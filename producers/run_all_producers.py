@@ -87,18 +87,19 @@ BOROUGH_CENTROIDS = {
     "STATEN ISLAND": (40.5795, -74.1502),
 }
 
-# ─── Kafka helpers ────────────────────────────────────────────────────────────
+# Kafka helpers
 
+# called once at startup and makes sure all 4 topics exist before producers start sending
 def create_topics(broker: str) -> None:
     """Create all Kafka topics once at startup."""
     log = logging.getLogger("topic-init")
     try:
-        admin = AdminClient({"bootstrap.servers": broker, "socket.timeout.ms": 10000})
+        admin = AdminClient({"bootstrap.servers": broker, "socket.timeout.ms": 10000}) # Connects as an admin
         meta  = admin.list_topics(timeout=15)
         new_topics = [
             NewTopic(t, num_partitions=p, replication_factor=1)
             for t, p in TOPICS.items()
-            if t not in meta.topics
+            if t not in meta.topics # only creates the missing topics
         ]
         if new_topics:
             results = admin.create_topics(new_topics)
@@ -113,7 +114,7 @@ def create_topics(broker: str) -> None:
     except Exception as exc:
         log.warning("Could not pre-create topics (auto-create may handle it): %s", exc)
 
-
+# Called by producers and connects to Kafka
 def make_producer(client_id: str) -> Producer:
     return Producer({
         "bootstrap.servers":            KAFKA_BROKER,
@@ -163,10 +164,7 @@ def lat_lon_to_zone(lat: float, lon: float, idx: int) -> str:
     return f"MN-{(idx % 6) + 1:02d}"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PRODUCER 1 – TRAFFIC
-# ══════════════════════════════════════════════════════════════════════════════
-
+# Reads CSV row by row and sends each row to Kafka
 def run_traffic_producer():
     log      = logging.getLogger("traffic-producer")
     topic    = "traffic_stream"
@@ -221,8 +219,8 @@ def run_traffic_producer():
                     producer.poll(0)
                     total_sent += 1
                     w_sent     += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.getLogger("traffic-producer").debug("Row %d skipped: %s", idx, e)
 
                 elapsed = time.time() - w_start
                 if elapsed >= 5.0:
@@ -358,8 +356,8 @@ def run_pollution_producer():
                                          value=json.dumps(msg).encode(), callback=delivery_report)
                         producer.poll(0)
                         total_sent += 1; w_sent += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.getLogger("pollution-prod").debug("Row %d skipped: %s", idx, e)
                     elapsed = time.time() - w_start
                     if elapsed >= 5.0:
                         log.info("%.1f rows/sec | total: %d | uptime: %.0fs",
@@ -450,8 +448,8 @@ def run_weather_producer():
                 producer.poll(0)
                 total_sent += 1
                 w_sent     += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger("weather-prod").debug("Row %d skipped: %s", idx, e)
 
             elapsed = time.time() - w_start
             if elapsed >= 5.0:
@@ -466,7 +464,7 @@ def run_weather_producer():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PRODUCER 4 – WORKERS (no CSV needed)
+# PRODUCER 4 – WORKERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Pre-compute zone lat/lon centroids
@@ -616,7 +614,7 @@ def main():
     # Create topics
     create_topics(KAFKA_BROKER)
 
-    # Launch producer threads
+    # Launch all 4 producers as parallel threads
     threads = []
     for name, func in PRODUCERS:
         t = threading.Thread(target=func, name=name, daemon=True)

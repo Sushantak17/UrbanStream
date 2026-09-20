@@ -34,7 +34,7 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [STREAM-PROCESSOR] %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Redis ─────────────────────────────────────────────────────────────────────
+# connects to Redis and pings it even before spark starts
 try:
     import redis as _rl
     _redis = _rl.Redis(host=REDIS_HOST, port=6379, db=0,
@@ -112,154 +112,18 @@ _total     = [0]
 
 from streaming_kmeans import StreamingKMeans, CLUSTER_NAMES  # testable without Spark
 
+# Anomaly detection (Isolation Forest)
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from ml.anomaly_detector import AnomalyDetector
+    _anomaly_detector = AnomalyDetector()
+    log.info("Anomaly detector: %s", "ready" if _anomaly_detector.is_ready else "model not found")
+except Exception as e:
+    _anomaly_detector = None
+    log.warning("Anomaly detector import failed: %s", e)
+
 # Borough density proxy (population density index 0-1)
 BOROUGH_DENSITY = {"MN": 1.0, "BK": 0.75, "QN": 0.60, "BX": 0.55, "SI": 0.30}
-
-# Streaming KMeans state — persists across all batches
-class StreamingKMeans:
-    """
-    Pure-Python streaming k-means with MiniBatchKMeans-style partial_fit.
-    Features (4D): [norm_speed, norm_aqi, norm_pm25, norm_density]
-    """
-    def __init__(self, k: int = 4):
-        self.k          = k
-        self.centroids  = None   # list of k feature vectors (lists)
-        self.counts     = [0] * k
-        self.n_batches  = 0
-        self.inertia    = float("inf")
-
-    # ── Normalisation helpers (running min/max) ───────────────────────────────
-    _feat_min = [0.0,   0.0,  0.0, 0.0]
-    _feat_max = [80.0, 200.0, 60.0, 1.0]
-
-    def _norm(self, x: list) -> list:
-        return [
-            (x[i] - self._feat_min[i]) / max(1e-9, self._feat_max[i] - self._feat_min[i])
-            for i in range(len(x))
-        ]
-
-    def _update_range(self, X: list) -> None:
-        for i in range(len(self._feat_min)):
-            vals = [row[i] for row in X]
-            self._feat_min[i] = min(self._feat_min[i], min(vals))
-            self._feat_max[i] = max(self._feat_max[i], max(vals))
-
-    # ── Distance ─────────────────────────────────────────────────────────────
-    @staticmethod
-    def _dist(a: list, b: list) -> float:
-        return sum((ai - bi) ** 2 for ai, bi in zip(a, b))
-
-    # ── Assign each point to nearest centroid ─────────────────────────────────
-    def _assign(self, X_norm: list) -> list:
-        labels = []
-        for x in X_norm:
-            best, best_d = 0, float("inf")
-            for j, c in enumerate(self.centroids):
-                d = self._dist(x, c)
-                if d < best_d:
-                    best_d, best = d, j
-            labels.append(best)
-        return labels
-
-    # ── partial_fit: one mini-batch update ───────────────────────────────────
-    def partial_fit(self, X: list) -> list:
-        """
-        X: list of feature vectors (one per zone)
-        Returns: list of cluster indices (one per zone)
-        """
-        if len(X) < self.k:
-            return list(range(len(X)))
-
-        self._update_range(X)
-        X_norm = [self._norm(x) for x in X]
-
-        # Initialise centroids on first batch (k-means++ style: spaced out)
-        if self.centroids is None:
-            self.centroids = []
-            # First centroid: pick point closest to mean
-            mean = [sum(x[i] for x in X_norm) / len(X_norm) for i in range(len(X_norm[0]))]
-            first = min(range(len(X_norm)),
-                        key=lambda i: self._dist(X_norm[i], mean))
-            self.centroids.append(list(X_norm[first]))
-            # Remaining centroids: pick point furthest from existing centroids
-            for _ in range(self.k - 1):
-                dists = [min(self._dist(x, c) for c in self.centroids) for x in X_norm]
-                # Weighted random selection proportional to distance²
-                total = sum(dists)
-                if total < 1e-12:
-                    idx = random.randrange(len(X_norm))
-                else:
-                    r = random.random() * total
-                    cumul = 0.0
-                    idx = len(X_norm) - 1
-                    for i, d in enumerate(dists):
-                        cumul += d
-                        if cumul >= r:
-                            idx = i
-                            break
-                self.centroids.append(list(X_norm[idx]))
-            self.counts = [0] * self.k
-
-        # Assign points to nearest centroid
-        labels = self._assign(X_norm)
-
-        # Mini-batch gradient descent update
-        # Learning rate: η = 1 / (count_j + batch_size_j)
-        # This mirrors sklearn's MiniBatchKMeans update rule
-        batch_counts = defaultdict(int)
-        batch_sums   = defaultdict(lambda: [0.0] * len(X_norm[0]))
-        for x, lbl in zip(X_norm, labels):
-            batch_counts[lbl] += 1
-            for i, v in enumerate(x):
-                batch_sums[lbl][i] += v
-
-        for j in range(self.k):
-            if batch_counts[j] == 0:
-                continue
-            n_j = batch_counts[j]
-            self.counts[j] += n_j
-            # η decays as more data is seen (online learning rate)
-            eta = n_j / self.counts[j]
-            new_c = [batch_sums[j][i] / n_j for i in range(len(self.centroids[j]))]
-            self.centroids[j] = [
-                (1 - eta) * self.centroids[j][i] + eta * new_c[i]
-                for i in range(len(self.centroids[j]))
-            ]
-
-        # Compute inertia (sum of squared distances to assigned centroid)
-        self.inertia = sum(
-            self._dist(X_norm[i], self.centroids[labels[i]])
-            for i in range(len(X_norm))
-        )
-        self.n_batches += 1
-        return labels
-
-    def semantic_labels(self, zones: list, labels: list) -> dict:
-        """
-        Assign semantic names to clusters by hazard rank.
-        Hazard = high AQI feature (idx 1) - speed feature (idx 0) in centroid.
-        Highest hazard → "Permanently Hazardous", lowest → "Safe Corridor".
-        """
-        if self.centroids is None:
-            return {z: "Safe Corridor" for z in zones}
-
-        # Denormalise centroid features for interpretable hazard score
-        def denorm(c):
-            return [
-                c[i] * (self._feat_max[i] - self._feat_min[i]) + self._feat_min[i]
-                for i in range(len(c))
-            ]
-
-        hazard = {}
-        for j, c in enumerate(self.centroids):
-            dc = denorm(c)
-            # hazard = aqi_centroid - speed_centroid  (same logic as your original)
-            hazard[j] = dc[1] - dc[0]
-
-        sorted_clusters = sorted(hazard.keys(), key=lambda x: -hazard[x])
-        name_map = {c: CLUSTER_NAMES[min(i, 3)] for i, c in enumerate(sorted_clusters)}
-        return {z: name_map[lbl] for z, lbl in zip(zones, labels)}
-
 
 # Singleton model — persists across all foreachBatch calls in this JVM process
 _skm = StreamingKMeans(k=K)
@@ -267,6 +131,7 @@ _skm = StreamingKMeans(k=K)
 # ── Centroid persistence helpers ──────────────────────────────────────────────
 _SKM_CENTROID_KEY = "skm_centroids"
 
+# loads previous K-Means model state
 def _restore_centroids_from_redis() -> None:
     """Reload centroid state saved by a previous Spark run so partial_fit
     continues from where it left off instead of reinitialising."""
@@ -354,7 +219,7 @@ def _retrain_and_push_clusters(batch_id: int) -> None:
     # Assign semantic names from centroid hazard ranking
     zone_clusters = _skm.semantic_labels(zone_ids, labels)
 
-    # Push cluster:{zone_id} → label to Redis (TTL 5 min)
+    # push all cluster labels to Redis
     if _redis:
         try:
             pipe = _redis.pipeline()
@@ -382,9 +247,6 @@ def _retrain_and_push_clusters(batch_id: int) -> None:
                  ", ".join(sorted(zlist)[:4]) + ("…" if len(zlist) > 4 else ""))
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Zone score push  (unchanged from v3)
-# ═════════════════════════════════════════════════════════════════════════════
 
 def _push_zone_scores(batch_id: int) -> None:
     zones = set(list(_traffic.keys()) + list(_pollution.keys()))
@@ -396,7 +258,7 @@ def _push_zone_scores(batch_id: int) -> None:
         p   = _pollution.get(zid, {"avg_aqi": 50.0, "avg_pm25": 10.0, "avg_no2": 20.0})
         spd = t["avg_speed"]; aqi = p["avg_aqi"]
         ss  = min(1.0, spd / BASELINE_SPEED)
-        aq  = min(1.0, aqi / 100.0)
+        aq  = 1.0 - min(1.0, aqi / 200.0)   # inverted: higher AQI → lower score
         zs  = round(ss * 0.5 + aq * 0.5, 3)
         # Thresholds tuned to real data ranges (speed 30-57 km/h, AQI 33-50)
         cong = spd < BASELINE_SPEED * 0.85   # < 34 km/h  → congestion
@@ -409,6 +271,8 @@ def _push_zone_scores(batch_id: int) -> None:
                         "zone_score": zs, "event_type": evt,
                         "borough": t["borough"], "batch_id": batch_id,
                         "ts": datetime.now().isoformat(timespec="seconds")})
+        
+    # all 30 zones in one pipeline call in redis
     if _redis:
         try:
             pipe = _redis.pipeline()
@@ -420,11 +284,34 @@ def _push_zone_scores(batch_id: int) -> None:
 
     evts = [s for s in scores if s["event_type"] != "NORMAL"]
     if evts:
-        log.warning("[EVENTS] Batch #%d → %d anomalies: %s",
+        log.warning("[EVENTS] Batch #%d → %d threshold events: %s",
                     batch_id, len(evts),
                     ", ".join(f"{e['zone_id']}:{e['event_type']}" for e in evts[:5]))
-    log.info("[ZONE_SCORES] Batch #%d | %d zones | pushed to Redis", batch_id, len(scores))
 
+    # ── Anomaly detection (Isolation Forest) ──────────────────────────────────
+    if _anomaly_detector and _anomaly_detector.is_ready:
+        zone_features = {s["zone_id"]: s for s in scores}
+        anomalies = _anomaly_detector.detect_anomalies(zone_features)
+        if anomalies and _redis:
+            try:
+                pipe = _redis.pipeline()
+                for a in anomalies:
+                    a["batch_id"] = batch_id
+                    a["ts"] = datetime.now().isoformat(timespec="seconds")
+                    pipe.set(f"anomaly:{a['zone_id']}", json.dumps(a), ex=300)
+                pipe.execute()
+                log.warning("[ANOMALY] Batch #%d → %d anomalies: %s",
+                            batch_id, len(anomalies),
+                            ", ".join(f"{a['zone_id']}[{a['severity']}]" for a in anomalies[:5]))
+            except Exception as e:
+                log.warning("[REDIS] anomaly push failed: %s", e)
+
+    if _redis:
+        log.info("[ZONE_SCORES] Batch #%d | %d zones | pushed to Redis", batch_id, len(scores))
+    else:
+        log.warning("[ZONE_SCORES] Batch #%d | %d zones | Redis unavailable — data NOT pushed", batch_id, len(scores))
+
+    # write permanently as JSON file in MINIO
     try:
         from pyspark.sql import SparkSession
         spark = SparkSession.getActiveSession()
@@ -439,10 +326,7 @@ def _push_zone_scores(batch_id: int) -> None:
         log.warning("[DATALAKE] Write failed: %s", e)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Kafka reader
-# ═════════════════════════════════════════════════════════════════════════════
-
+# Creates a streaming DataFrame that represents an infinite table of Kafka messages. 
 def read_kafka(spark, topic, schema):
     raw = (spark.readStream.format("kafka")
            .option("kafka.bootstrap.servers", KAFKA_BROKER)
@@ -458,10 +342,7 @@ def read_kafka(spark, topic, schema):
                 F.coalesce(F.to_timestamp("timestamp"), F.col("kafka_ts"))))
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# foreachBatch handlers
-# ═════════════════════════════════════════════════════════════════════════════
-
+# processes one 30 second batch of traffic data
 def handle_traffic(df: DataFrame, batch_id: int):
     rows = df.collect()
     if not rows:
@@ -594,10 +475,8 @@ def handle_metrics(df: DataFrame, batch_id: int):
             pass
 
 
-# ═════════════════════════════════════════════════════════════════════════════
 # SparkSession + Main
-# ═════════════════════════════════════════════════════════════════════════════
-
+# Creates the SparkSession with all configs
 def create_spark():
     minio_endpoint = os.getenv("MINIO_ENDPOINT",       "http://minio:9000")
     minio_user     = os.getenv("MINIO_ROOT_USER",      "minioadmin")
@@ -630,6 +509,7 @@ def main():
     log.info("Datalake  → %s", DATALAKE_BASE)
     log.info("Checkpoints → %s", CHECKPOINT_BASE)
 
+    # creates 4 streaming DataFrames, one per Kafka topic
     traffic_raw   = read_kafka(spark, "traffic_stream",   TRAFFIC_SCHEMA)
     pollution_raw = read_kafka(spark, "pollution_stream", POLLUTION_SCHEMA)
     weather_raw   = read_kafka(spark, "weather_stream",   WEATHER_SCHEMA)
@@ -641,7 +521,8 @@ def main():
                   .option("checkpointLocation", cp)
                   .trigger(processingTime="30 seconds")
                   .foreachBatch(fn).start())
-
+    
+    # starts all 5 in parallel and they never stop until Spark shuts down  
     q1 = _qs(traffic_raw,   f"{CHECKPOINT_BASE}/traffic",   handle_traffic)
     q2 = _qs(pollution_raw, f"{CHECKPOINT_BASE}/pollution",  handle_pollution)
     q3 = _qs(weather_raw,   f"{CHECKPOINT_BASE}/weather",    handle_weather)

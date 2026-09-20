@@ -1,0 +1,17 @@
+{
+  "lstm": {
+    "mse": 43.2071,
+    "mae": 4.8842,
+    "mape": 9.66
+  },
+  "ar3": {
+    "mse": 91.0432,
+    "mae": 7.1008,
+    "mape": 13.96
+  },
+  "improvement_pct": 52.5,
+  "train_size": 1881,
+  "test_size": 404,
+  "epochs_trained": 50,
+  "best_val_loss": 0.017071
+}

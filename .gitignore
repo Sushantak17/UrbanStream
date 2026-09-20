@@ -1,37 +1,65 @@
-# Python
+# ── Python ────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
 
-# Logs & temp
+# ── Virtual environments ──────────────────────────
+venv/
+.venv/
+env/
+
+# ── Logs & temp ───────────────────────────────────
 *.log
 *.tmp
+.logs/
 
-# ML / Big Data (VERY IMPORTANT)
+# ── Data files (large, downloaded via download_data.py) ──
 data/
-mlruns/
+
+# ── Large binary formats ─────────────────────────
 *.parquet
 *.csv
 *.zip
 *.h5
-*.pth
-*.pt
 
-# Models
-models/
+# ── ML model artifacts ───────────────────────────
+# NOTE: ml/models/ is TRACKED (small, needed for dashboard cold-start)
+# Only ignore top-level /models and checkpoint dirs
+/models/
 checkpoints/
 *.ckpt
+mlruns/
 
-# Docker
+# ── Docker ────────────────────────────────────────
 *.env
+docker-compose.override.yml
 
-# OS files
+# ── OS files ──────────────────────────────────────
 .DS_Store
+Thumbs.db
 
-# IDE
+# ── IDE ───────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
-# Misc
+# ── Pytest ────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── Jupyter ───────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Misc ──────────────────────────────────────────
 *.sqlite3
+urbanstream_documentation.md
+UI_Mockup.html

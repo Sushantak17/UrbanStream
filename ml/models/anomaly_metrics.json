@@ -1,0 +1,10 @@
+{
+  "n_samples": 1500,
+  "n_anomalies": 75,
+  "n_normal": 1425,
+  "contamination": 0.05,
+  "n_estimators": 200,
+  "score_min": -0.7226,
+  "score_max": -0.3982,
+  "score_mean": -0.4714
+}

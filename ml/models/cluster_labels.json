@@ -1,0 +1,51 @@
+{
+  "zone_labels": {
+    "MN-01": "Permanently Hazardous",
+    "MN-02": "Permanently Hazardous",
+    "MN-03": "Peak Hour Hazardous",
+    "MN-04": "Permanently Hazardous",
+    "MN-05": "Peak Hour Hazardous",
+    "MN-06": "Peak Hour Hazardous",
+    "BK-01": "Weather Sensitive",
+    "BK-02": "Weather Sensitive",
+    "BK-03": "Permanently Hazardous",
+    "BK-04": "Weather Sensitive",
+    "BK-05": "Permanently Hazardous",
+    "BK-06": "Weather Sensitive",
+    "QN-01": "Weather Sensitive",
+    "QN-02": "Weather Sensitive",
+    "QN-03": "Weather Sensitive",
+    "QN-04": "Permanently Hazardous",
+    "QN-05": "Weather Sensitive",
+    "QN-06": "Permanently Hazardous",
+    "BX-01": "Permanently Hazardous",
+    "BX-02": "Weather Sensitive",
+    "BX-03": "Permanently Hazardous",
+    "BX-04": "Weather Sensitive",
+    "BX-05": "Weather Sensitive",
+    "BX-06": "Weather Sensitive",
+    "SI-01": "Safe Corridor",
+    "SI-02": "Safe Corridor",
+    "SI-03": "Safe Corridor",
+    "SI-04": "Safe Corridor",
+    "SI-05": "Safe Corridor",
+    "SI-06": "Safe Corridor"
+  },
+  "cluster_name_map": {
+    "0": "Permanently Hazardous",
+    "2": "Peak Hour Hazardous",
+    "3": "Weather Sensitive",
+    "1": "Safe Corridor"
+  },
+  "feature_cols": [
+    "avg_speed",
+    "std_speed",
+    "pct_slow",
+    "avg_pm25",
+    "std_pm25",
+    "avg_aqi_proxy",
+    "density"
+  ],
+  "silhouette_score": 0.6342,
+  "n_clusters": 4
+}
