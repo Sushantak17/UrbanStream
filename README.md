@@ -1,204 +1,164 @@
 # 🌆 UrbanStream
 
-> Real-time urban event detection & gig worker pollution exposure tracking  
-> Apache Kafka · Apache Spark · MinIO · Redis · Streamlit
+> **Real-Time Pollution-Aware Routing for Gig Workers**  
+> Apache Spark · Redpanda (Kafka) · Redis · MinIO · PyTorch · Multi-Agent AI
+
+A real-time urban air quality monitoring and worker safety platform for New York City. Ingests live traffic, pollution, and weather data through a streaming pipeline, applies 4 ML models for intelligent decision-making, and orchestrates worker relocations via a multi-agent system.
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-NYC Open Data CSVs & 
-OPENAQ API(Realtime)
-        │
-        ▼
-  ┌─────────────┐     ┌──────────────────────┐     ┌──────────────┐
-  │  Producers  │────▶│  Redpanda (Kafka)     │────▶│  Spark       │
-  │  (4 topics) │     │  traffic_stream       │     │  Structured  │
-  │             │     │  pollution_stream     │     │  Streaming   │
-  │  Traffic    │     │  weather_stream       │     └──────┬───────┘
-  │  Pollution  │     │  worker_stream        │            │
-  │  Weather    │     └──────────────────────┘            │ Parquet
-  │  Workers    │                                         ▼
-  └─────────────┘                              ┌──────────────────┐
-                                               │  MinIO (S3)      │
-                                               │  /zone_scores    │
-                                               │  /events         │
-                                               │  /worker_exp.    │
-                                               └─────────┬────────┘
-                                                         │
-                                               ┌─────────▼────────┐
-                                               │  ML Jobs         │
-                                               │  clustering.py   │──▶ Redis
-                                               │  recommender.py  │◀──
-                                               └─────────┬────────┘
-                                                         │
-                                               ┌─────────▼────────┐
-                                               │  Streamlit       │
-                                               │  Dashboard       │
-                                               └──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           DATA SOURCES                                   │
+│   NYC Traffic (13M rows)  ·  OpenAQ Pollution (4M rows)  ·  Weather      │
+└──────────┬───────────────────────────┬──────────────────────┬────────────┘
+           │                           │                      │
+           ▼                           ▼                      ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    KAFKA PRODUCERS (4 threads)                            │
+│   traffic_stream · pollution_stream · weather_stream · worker_stream     │
+│   Confluent Kafka · CSV replay · 50 simulated gig workers                │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                  REDPANDA (Kafka-compatible broker)                       │
+│                  4 topics · 3 partitions each                             │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│             SPARK STRUCTURED STREAMING (Master + Worker)                  │
+│   3 streaming queries · foreachBatch · 30s tumbling windows               │
+│   Zone scoring · Exposure tracking · 2-min watermark                      │
+│   Checkpoints → MinIO (S3)  ·  Results → Redis                           │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               │
+                    ┌──────────┴───────────┐
+                    ▼                      ▼
+             ┌────────────┐         ┌─────────────┐
+             │   Redis    │         │  MinIO (S3)  │
+             │ State Store│         │ Checkpoints  │
+             └──────┬─────┘         │ Data Lake    │
+                    │               └──────────────┘
+          ┌─────────┼──────────┐
+          ▼         ▼          ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│              MULTI-AGENT SYSTEM (4 Agents + Coordinator)             │
+│                                                                      │
+│   Monitor (15s)  →  Forecaster (30s)  →  Router (30s)  →  Alert (30s)│
+│   IsolationForest    LSTM                 LinUCB Bandit    Briefings  │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                    STREAMLIT DASHBOARD                                │
+│   Real-time monitoring · Worker exposure feed · Relocate dispatch     │
+│   Zone clustering map · Agent status · ML model metrics               │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Prerequisites
+## ML Models
 
-- Docker Desktop (or Docker + Docker Compose) installed
+| Model | Algorithm | Purpose | Key Details |
+|---|---|---|---|
+| **Zone Clustering** | K-Means (K=4) | Classify 30 zones into risk profiles | 7 features, silhouette-validated, 4 clusters: Safe Corridor, Weather Sensitive, Peak Hour Hazardous, Permanently Hazardous |
+| **AQI Forecaster** | 2-layer LSTM (PyTorch) | Predict next 3 AQI time steps | Input: 24 historical readings, 32.5% better than AR(3) baseline |
+| **Anomaly Detector** | Isolation Forest | Detect unusual zone states | 5 features, 5% contamination, generates human-readable explanations |
+| **Worker Router** | LinUCB Contextual Bandit | Optimal worker-to-zone routing | 13-dim context, 30 arms, exploration-exploitation with cold-start fallback |
+
+---
+
+## Multi-Agent System
+
+| Agent | Interval | ML Model | Role |
+|---|---|---|---|
+| **Monitor** | 15s | Isolation Forest | Scans zones for anomalies |
+| **Forecaster** | 30s | LSTM | Predicts AQI trends |
+| **Router** | 30s | LinUCB Bandit | Assigns workers to safe zones |
+| **Alert** | 30s | Rule-based | Generates safety briefings |
+| **Coordinator** | 15s | — | Orchestrates lifecycle, restarts dead agents |
+
+---
+
+## Quick Start
+
+### Prerequisites
+- Docker Desktop (≥ 8 GB RAM allocated)
 - Python 3.10+
-- ~8 GB free RAM (for Spark + Redpanda + MinIO)
 
----
+### One-Command Launch
 
-## Step 1 – Download the Datasets
-
-Create the `data/` directory and download three CSVs:
-
-### 1. NYC Traffic Speed (NYC OpenData)
 ```bash
-# Visit: https://data.cityofnewyork.us/Transportation/Traffic-Speed/4h9m-uh3q
-# Click Export → CSV
-# Save as: data/nyc_traffic.csv
-```
-Required columns: `SPEED`, `LINK_ID`, `DATA_AS_OF`, `BOROUGH`, `LINK_POINTS`
-
-### 2. OpenAQ Air Quality – NYC Stations
-```bash
-# Visit: https://openaq.org/data/
-# Filter: Country=US, City=New York, Parameter=pm25 AND no2
-# Export CSV
-# Save as: data/openaq_nyc.csv
-```
-Required columns: `location`, `parameter`, `value`, `unit`, `date_utc`, `latitude`, `longitude`
-
-### 3. Open-Meteo Historical Weather
-```bash
-# Option A – Web UI:
-# Visit: https://open-meteo.com/
-# Location: New York (lat=40.7128, lon=-74.0060)
-# Variables: temperature_2m, relativehumidity_2m, windspeed_10m
-# Start date: 2023-01-01, End date: 2024-01-01
-# Export CSV → Save as: data/weather_nyc.csv
-
-# Option B – API (Python):
-python3 - << 'EOF'
-import requests, csv, json
-
-url = (
-    "https://archive-api.open-meteo.com/v1/archive"
-    "?latitude=40.7128&longitude=-74.0060"
-    "&start_date=2023-01-01&end_date=2024-01-01"
-    "&hourly=temperature_2m,relativehumidity_2m,windspeed_10m"
-    "&timezone=America%2FNew_York"
-)
-r = requests.get(url)
-data = r.json()
-hourly = data["hourly"]
-
-with open("data/weather_nyc.csv", "w", newline="") as f:
-    w = csv.DictWriter(f, fieldnames=["time","temperature_2m","relativehumidity_2m","windspeed_10m"])
-    w.writeheader()
-    for i, t in enumerate(hourly["time"]):
-        w.writerow({
-            "time": t,
-            "temperature_2m": hourly["temperature_2m"][i],
-            "relativehumidity_2m": hourly["relativehumidity_2m"][i],
-            "windspeed_10m": hourly["windspeed_10m"][i],
-        })
-print("Downloaded", len(hourly["time"]), "weather records")
-EOF
+# Download data + start everything
+chmod +x run.sh
+./run.sh
 ```
 
----
+This will:
+1. Start Docker services (Redpanda, Spark, Redis, MinIO)
+2. Install Python dependencies
+3. Train ML models (KMeans, LSTM, Isolation Forest)
+4. Start Kafka producers (4 data streams)
+5. Submit Spark streaming job
+6. Launch recommender + multi-agent system
+7. Open the Streamlit dashboard at **http://localhost:8501**
 
-## Step 2 – Install Python Dependencies (for local producers / dashboard)
+### Manual Step-by-Step
+
+<details>
+<summary>Click to expand manual setup</summary>
+
+#### 1. Download Datasets
+
+```bash
+python3 download_data.py
+```
+
+Or manually download:
+- **NYC Traffic**: [NYC OpenData Traffic Speed](https://data.cityofnewyork.us/Transportation/Traffic-Speed/4h9m-uh3q) → `data/nyc_traffic.csv`
+- **OpenAQ Pollution**: [OpenAQ](https://openaq.org/data/) (NYC, pm25 + no2) → `data/openaq_nyc.csv`
+- **Weather**: [Open-Meteo](https://open-meteo.com/) (NYC, 2023) → `data/weather_nyc.csv`
+
+#### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create `requirements.txt`:
-```
-confluent-kafka>=2.3.0
-redis>=5.0.0
-pandas>=2.0.0
-streamlit>=1.30.0
-pydeck>=0.8.0
-plotly>=5.18.0
-requests>=2.31.0
-boto3>=1.34.0
-pyspark>=3.5.0
-```
-
----
-
-## Step 3 – Start All Docker Services
+#### 3. Start Docker Services
 
 ```bash
-cd urbanstream/
 docker compose up -d
-
-# Wait ~60 seconds for all services to be healthy
+# Wait ~60s for health checks to pass
 docker compose ps
-
-# Check logs
-docker compose logs redpanda      # Kafka broker
-docker compose logs spark-master  # Spark UI
-docker compose logs minio         # Object storage
-docker compose logs redis         # Cache
 ```
 
-**Service URLs after startup:**
-| Service | URL |
-|---------|-----|
-| Redpanda Console | http://localhost:8080 |
-| Spark Master UI | http://localhost:8888 |
-| MinIO Console | http://localhost:9001 (user: minioadmin / minioadmin) |
-| Redis | localhost:6379 |
-
----
-
-## Step 4 – Run the Kafka Producers
-
-All 4 producers (traffic, pollution, weather, workers) are bundled into one script
-that runs them as parallel threads:
+#### 4. Train ML Models
 
 ```bash
-cd urbanstream/
+python3 ml/clustering.py           # KMeans zone clustering
+python3 ml/aqi_forecaster.py       # LSTM AQI forecaster
+python3 ml/anomaly_detector.py     # Isolation Forest
+```
+
+#### 5. Start Producers
+
+```bash
 KAFKA_BROKER=localhost:9092 python3 producers/run_all_producers.py
 ```
 
-**Speed up for throughput testing** (set env vars before running):
-```bash
-KAFKA_BROKER=localhost:9092 TRAFFIC_SPEED=500 POLLUTION_SPEED=200 \
-  python3 producers/run_all_producers.py   # 500 traffic + 200 pollution ev/sec
-
-KAFKA_BROKER=localhost:9092 TRAFFIC_SPEED=1000 \
-  python3 producers/run_all_producers.py   # 1000 traffic ev/sec
-```
-
-Available environment variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `TRAFFIC_SPEED` | 500 | Traffic rows/sec |
-| `POLLUTION_SPEED` | 200 | Pollution rows/sec |
-| `WEATHER_SPEED` | 10 | Weather rows/sec |
-| `NUM_WORKERS` | 50 | Simulated gig workers |
-| `MOVE_INTERVAL` | 30 | Seconds between worker zone changes |
-
----
-
-## Step 5 – Submit the Spark Streaming Job
+#### 6. Submit Spark Job
 
 ```bash
 docker exec urbanstream-spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
-  --executor-cores 2 \
-  --executor-memory 1g \
   --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367 \
   --py-files /opt/spark/jobs/streaming_kmeans.py \
-  --conf spark.sql.shuffle.partitions=8 \
-  --conf spark.executor.memory=1g \
   --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
   --conf spark.hadoop.fs.s3a.access.key=minioadmin \
   --conf spark.hadoop.fs.s3a.secret.key=minioadmin \
@@ -208,72 +168,118 @@ docker exec urbanstream-spark-master /opt/spark/bin/spark-submit \
   /opt/spark/jobs/stream_processor.py
 ```
 
-Watch the Spark UI at http://localhost:8888 to see active streaming queries.
-
----
-
-## Step 6 – Run ML Jobs (Optional, enhances dashboard)
+#### 7. Start ML + Agents
 
 ```bash
-# Train offline KMeans and save model artefacts (run once, or hourly via cron)
-python3 ml/clustering.py
-
-# Evaluate the model — produces elbow, silhouette, PCA and centroid plots
-jupyter notebook ml/clustering_evaluation.ipynb
-
-# Recommender (run every 30 seconds alongside Spark)
-REDIS_HOST=localhost python3 ml/recommender.py
+REDIS_HOST=localhost python3 ml/recommender.py &
+REDIS_HOST=localhost python3 agents/run_agents.py &
 ```
 
-Plots are saved to `ml/models/` automatically when the notebook runs:
-`elbow_silhouette.png`, `silhouette_plot.png`, `pca_scatter.png`, `centroid_profiles.png`, `cluster_composition.png`
-
----
-
-## Step 7 – Launch the Dashboard
+#### 8. Launch Dashboard
 
 ```bash
-cd urbanstream/
 REDIS_HOST=localhost streamlit run dashboard/dashboard.py --server.port 8501
 ```
 
-Open http://localhost:8501 in your browser.
-
-The dashboard works even before data arrives – it shows synthetic placeholder data with graceful empty states.
+</details>
 
 ---
 
-## Data Volume Targets
+## Service URLs
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Records in 2h | 5M+ | At 100 ev/sec sustained |
-| Parquet compression | 3×+ | vs raw JSON |
-| Lag at 100 ev/s | <100ms | |
-| Lag at 500 ev/s | <400ms | |
-| Lag at 1000 ev/s | <1000ms | |
+| Service | URL |
+|---|---|
+| **Dashboard** | http://localhost:8501 |
+| Redpanda Console | http://localhost:8080 |
+| Spark Master UI | http://localhost:8888 |
+| MinIO Console | http://localhost:9001 (`minioadmin` / `minioadmin`) |
+| Redis | `localhost:6379` |
 
 ---
 
-## File Structure
+## Project Structure
 
 ```
 urbanstream/
-├── docker-compose.yml      ← All services (Redpanda, Spark, MinIO, Redis)
-├── data/
-│   ├── nyc_traffic.csv     ← Download per Step 1
-│   ├── openaq_nyc.csv      ← Download per Step 1
-│   └── weather_nyc.csv     ← Download per Step 1
+├── run.sh                          ← One-command launcher
+├── docker-compose.yml              ← 8 Docker services
+├── requirements.txt                ← Python dependencies
+├── download_data.py                ← Dataset downloader
+│
 ├── producers/
-│   └── run_all_producers.py ← All 4 producers as threads (traffic/pollution/weather/workers)
+│   └── run_all_producers.py        ← 4-thread Kafka producer
+│
 ├── spark/
-│   └── stream_processor.py  ← Main Spark job (5 streaming queries)
+│   ├── stream_processor.py         ← Spark Structured Streaming (3 queries)
+│   └── streaming_kmeans.py         ← Real-time KMeans inside Spark
+│
 ├── ml/
-│   ├── clustering.py              ← Hourly KMeans clustering
-│   ├── clustering_evaluation.ipynb← Elbow, silhouette, PCA, centroid analysis
-│   └── recommender.py             ← 30s recommendation loop
-└── dashboard/
-    └── dashboard.py         ← Streamlit 5-tab dashboard
+│   ├── clustering.py               ← Offline KMeans (K=4) zone clustering
+│   ├── aqi_forecaster.py           ← PyTorch 2-layer LSTM
+│   ├── anomaly_detector.py         ← Isolation Forest + explanation gen
+│   ├── bandit_router.py            ← LinUCB contextual bandit (30 arms)
+│   ├── recommender.py              ← Unified recommendation engine
+│   └── models/                     ← Pre-trained model artifacts
+│       ├── kmeans_zones.joblib
+│       ├── scaler_zones.joblib
+│       ├── cluster_labels.json
+│       ├── aqi_lstm.pt
+│       ├── aqi_lstm_metrics.json
+│       ├── anomaly_iforest.joblib
+│       ├── anomaly_scaler.joblib
+│       └── anomaly_metrics.json
+│
+├── agents/
+│   ├── base_agent.py               ← Abstract base (perceive → decide → act)
+│   ├── monitor_agent.py            ← Anomaly detection agent (15s)
+│   ├── forecaster_agent.py         ← LSTM prediction agent (30s)
+│   ├── router_agent.py             ← LinUCB routing agent (30s)
+│   ├── alert_agent.py              ← Safety briefing agent (30s)
+│   ├── coordinator.py              ← Supervisor — lifecycle management
+│   └── run_agents.py               ← Agent launcher
+│
+├── dashboard/
+│   └── dashboard.py                ← Streamlit dashboard (3 tabs)
+│
+├── tests/
+│   └── test_urbanstream.py         ← 33 tests (pytest)
+│
+├── clustering_evaluation.ipynb     ← Elbow, silhouette, PCA analysis
+└── data/                           ← (gitignored) Downloaded CSVs
+    ├── nyc_traffic.csv             ← 13.4 MB
+    ├── openaq_nyc.csv              ← 3.9 MB
+    └── weather_nyc.csv             ← 256 KB
+```
+
+---
+
+## Configuration
+
+### Producer Speed
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRAFFIC_SPEED` | 500 | Traffic records/sec |
+| `POLLUTION_SPEED` | 200 | Pollution records/sec |
+| `WEATHER_SPEED` | 10 | Weather records/sec |
+| `NUM_WORKERS` | 50 | Simulated gig workers |
+| `MOVE_INTERVAL` | 30 | Seconds between worker zone changes |
+
+### Exposure Thresholds
+
+| Variable | Default | Description |
+|---|---|---|
+| `HIGH_AQI` | 100 | WHO threshold — unhealthy for sensitive groups |
+| `WARN_HRS` | 1.5 | Hours in high-AQI zone → WARNING |
+| `CRIT_HRS` | 3.0 | Hours in high-AQI zone → CRITICAL |
+
+---
+
+## Testing
+
+```bash
+pytest tests/ -v
+# 33 tests covering: KMeans, LSTM, IForest, LinUCB, agents, pipeline, integration
 ```
 
 ---
@@ -283,36 +289,42 @@ urbanstream/
 **Redpanda not starting?**
 ```bash
 docker compose logs redpanda
-# Increase Docker memory to ≥6GB in Docker Desktop settings
+# Increase Docker memory to ≥8GB in Docker Desktop settings
 ```
 
 **Spark job fails with S3A errors?**
 ```bash
-# Check MinIO is healthy
 curl http://localhost:9000/minio/health/live
-# Ensure buckets exist
 docker logs urbanstream-minio-init
 ```
 
 **Dashboard shows no data?**
 ```bash
-# Check Redis
 redis-cli -h localhost ping
-# The dashboard always shows synthetic fallback data
-# Real data flows in once Spark + producers are running
-```
-
-**Kafka topic not found?**
-```bash
-docker exec urbanstream-redpanda rpk topic list
-# Topics are auto-created by producers, or pre-created by redpanda-init
+# Dashboard shows synthetic fallback data even without live pipeline
+# Real data flows once Spark + producers are running
 ```
 
 ---
 
-## Stopping Everything
+## Stopping
 
 ```bash
-docker compose down          # Stop services (keep data volumes)
-docker compose down -v       # Stop + delete all data
+docker compose down          # Stop services (keep data)
+docker compose down -v       # Stop + delete all volumes
 ```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Message Broker | Redpanda (Kafka-compatible) |
+| Stream Processing | Apache Spark 3.5.3 Structured Streaming |
+| State Store | Redis 7.2 |
+| Object Storage | MinIO (S3-compatible) |
+| ML Framework | PyTorch, scikit-learn |
+| Agent System | Custom Python multi-agent (perceive-decide-act) |
+| Dashboard | Streamlit + Plotly + PyDeck |
+| Infrastructure | Docker Compose (8 services) |
